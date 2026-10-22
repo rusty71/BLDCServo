@@ -121,9 +121,60 @@ void packetChannels()
 
 
 
+// ---------------------------------------------------------------------------
+// Travel calibration
+//
+// The servo bottoms out on a hard stop at each end of its travel, and the
+// travel differs from unit to unit. Ramp the commanded angle slowly towards
+// a stop and take the angle at which the rotor stops following the ramp as
+// the stop: that is where the linkage bottoms out, whatever the controller
+// would still like to command. The voltage limit is reduced for the sweep so
+// a stalled motor cannot overheat or damage anything.
+// ---------------------------------------------------------------------------
+#define CAL_VOLTAGE_LIMIT  4.0f    // V, used only while finding the stops
+#define CAL_RAMP_SPEED     2.0f    // rad/s
+#define CAL_WINDOW_MS      100     // stall is judged over this window
+#define CAL_STALL_MOVE     0.02f   // less than this in one window = not moving
+#define CAL_TIMEOUT_MS     8000    // give up after this long
+
+static float sweepToStop(float direction, float start)
+{
+  float ref = motor.shaft_angle;
+  uint32_t refTime = millis();
+  uint32_t t0 = millis();
+  uint8_t  slow = 0;
+
+  while ((uint32_t)(millis() - t0) < CAL_TIMEOUT_MS)
+  {
+    float elapsed = (millis() - t0) / 1000.0f;
+    motor.target = start + direction * CAL_RAMP_SPEED * elapsed;
+    motor.loopFOC();
+    motor.move();
+
+    // Judge movement over a fixed window: a slow ramp moves less than one
+    // step per iteration, so per-iteration deltas would look like a stall.
+    if ((uint32_t)(millis() - refTime) >= CAL_WINDOW_MS)
+    {
+      float moved = fabsf(motor.shaft_angle - ref);
+      ref = motor.shaft_angle;
+      refTime = millis();
+      if (elapsed > 0.2f)
+      {
+        if (moved < CAL_STALL_MOVE)
+        {
+          if (++slow >= 2)
+            break;              // two windows without movement: at the stop
+        }
+        else
+          slow = 0;
+      }
+    }
+  }
+  return motor.shaft_angle;
+}
+
 void setup() {
   float sens;
-  int now;
   _delay(5000);
   spi2.begin();
   sensor1.init(&spi2);
@@ -159,7 +210,7 @@ void setup() {
     return;
   }
 
-  Serial.println("calibrate");
+  Serial.println("calibrate: finding the end stops");
   // Sample in the frame the position controller compares against:
   //   motor.shaftAngle() = sensor_direction * getAngle() - sensor_offset
   // The raw encoder angle is NOT the same frame when the encoder counts the
@@ -167,62 +218,44 @@ void setup() {
   motor.loopFOC();
   sens = motor.shaftAngle();
 
-  max_angle = sens;
-  min_angle = sens;
-if(1){
-  //force max angle
-  now = millis();
-  while((millis()-now) < 1000) {
-      motor.target = -3;
-      motor.loopFOC();
-      motor.move();
-  }
-  //relax and measure angle
-  motor.disable();
-  now = millis();
-  while((millis()-now) < 1000) {
-    motor.loopFOC();
-    motor.move();
-  }
-  min_angle = motor.shaftAngle();
-  
-  motor.enable();
-//force max angle
-  now = millis();
-  while((millis()-now) < 1000) {
-      motor.target = 3;
-      motor.loopFOC();
-      motor.move();
-  }
-  //relay and measure angle
-  motor.disable();
-  now = millis();
-  while((millis()-now) < 1000) {
-    motor.loopFOC();
-    motor.move();
-  }
-  max_angle = motor.shaftAngle();
-
-  now = millis();
-  while((millis()-now) < 1000) {
-   motor.loopFOC();
-    motor.move();
-  } 
- 
+  // Sweep with a reduced voltage limit so a stalled motor just holds gently
+  // against the stop instead of fighting it at full torque.
   motor.controller = MotionControlType::angle;
+  motor.voltage_limit = CAL_VOLTAGE_LIMIT;
+  motor.enable();
 
-  Serial.print("max angle : ");
-  Serial.println(max_angle);
-  Serial.print("min angle : ");
-  Serial.println(min_angle);
-  center_angle = (min_angle+((max_angle-min_angle)/2));
-  motor.target = center_angle; 
+  float stopA = sweepToStop(-1.0f, sens);
+  Serial.print("  stop A : "); Serial.println(stopA, 4);
+  float stopB = sweepToStop(+1.0f, motor.shaft_angle);
+  Serial.print("  stop B : "); Serial.println(stopB, 4);
+
+  min_angle = fminf(stopA, stopB);
+  max_angle = fmaxf(stopA, stopB);
+  center_angle = (min_angle + max_angle) / 2.0f;
+  float span = max_angle - min_angle;
+
+  Serial.print("  travel : "); Serial.print(span, 4);
+  Serial.print(" rad ("); Serial.print(span * 180.0f / PI); Serial.println(" deg)");
+  Serial.print("  min    : "); Serial.println(min_angle, 4);
+  Serial.print("  max    : "); Serial.println(max_angle, 4);
+  Serial.print("  center : "); Serial.println(center_angle, 4);
+
+  if (span < 0.20f)
+  {
+    // A tiny span means the sweep never left the first stop; driving with it
+    // would divide by almost nothing and slam the servo between the stops.
+    Serial.println("  TRAVEL TOO SMALL - check the linkage, servo left disabled");
+    motor.disable();
+    _delay(100);
+    return;
+  }
+
+  motor.voltage_limit = 12.0f;
+  motor.target = center_angle;
   motor.enable();
   motor.loopFOC();
   motor.move();
-  Serial.print("center : ");
-  Serial.println(motor.target);
-}
+  Serial.println("  at center");
    _delay(100);
 }
 

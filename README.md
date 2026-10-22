@@ -25,21 +25,51 @@ telemetry.
 
 ### Boot calibration
 
-On power-up the servo discovers its own mechanical range:
+The servo discovers its own mechanical range on every power-up. The travel
+differs from unit to unit (103.9 deg on the bench unit) and there is a hard
+stop at each end, so the sketch finds them by stalling the motor against them:
 
-1. Drive the motor to `target = -3` for 1 s. Because the torque controller is
-   in *voltage* mode and no phase resistance is configured, SimpleFOC maps
-   this to `voltage.q = -3 V`.
-2. Disable the motor and coast for 1 s, then sample the encoder →
-   `min_angle`.
-3. Repeat with `target = +3` → `max_angle`.
-4. `center_angle = min_angle + (max_angle - min_angle) / 2`.
-5. Switch to `MotionControlType::angle` and map channel 2 linearly onto
-   `[min_angle, max_angle]`.
+1. Switch to `MotionControlType::angle` and lower `voltage_limit` to
+   `CAL_VOLTAGE_LIMIT` (4 V), so a motor that is held against a stop pushes
+   gently instead of fighting it at full torque.
+2. Ramp the target at `CAL_RAMP_SPEED` (2 rad/s) towards one stop.
+3. Judge movement over a fixed 100 ms window: two consecutive windows with
+   less than `CAL_STALL_MOVE` (0.02 rad) of movement mean the rotor has
+   stopped following the ramp, so that is the stop. A per-iteration delta
+   would not work - a 2 rad/s ramp moves only about 1 mrad per control
+   iteration.
+4. Record that angle (`motor.shaftAngle()`) and ramp the other way for the
+   second stop.
+5. `min_angle` / `max_angle` are the two stops, `center_angle` their midpoint.
+   If the span comes out under 0.2 rad the linkage is jammed or disconnected;
+   the motor is then left disabled instead of mapping the channel onto
+   almost no travel.
+6. Restore the 12 V limit, stay in angle mode and move to `center_angle`.
+
+`CAL_TIMEOUT_MS` (8 s) bounds each sweep. On the bench the two sweeps take
+about two seconds, on top of the 5 s power-up delay, the 1 s `motor.init()`
+and the ~3 s `initFOC()` alignment. The result is printed on the debug port:
+
+```
+calibrate: finding the end stops
+  stop A : 1.2180
+  stop B : 3.0311
+  travel : 1.8132 rad (103.89 deg)
+  min    : 1.2180
+  max    : 3.0311
+  center : 2.1246
+  at center
+```
+
+Channel 2 is then mapped linearly onto that travel:
 
 ```
 motor.target = (steering_us - 1000.0f) * (max_angle - min_angle) / 1000.0f + min_angle;
 ```
+
+so 1000 us is the min stop, 1500 us the centre and 2000 us the max stop. The
+handset sends its own boot position as 1500 us, so the servo starts centred,
+and one full turn of the handset wheel spans this whole calibrated travel.
 
 ### Measured behaviour
 
@@ -188,26 +218,20 @@ Verified from the code and the captured trace.
    frame on **every** received channel frame (248 Hz), which contends for the
    shared CRSF bus - consider sending it less often.
 
-2. **The calibration samples the wrong moments.** The extremes are read once,
-   at the end of each 1 s sweep, instead of being tracked, so an overshoot that
-   settles back is not seen. ±3 V for 1 s is also a modest torque - if the
-   servo does not reach its limits the calibrated range is wrong. The range is
-   measured with the motor *coasting*, so back-drive and load-dependent
-   deflection are included.
-
-3. **The encoder is 11-bit.** The source comments note that 11 bits "causes
+2. **The encoder is 11-bit.** The source comments note that 11 bits "causes
    rumbling" and that 10 may be better.
 
-4. **The CSV-instrumented build is not behaviourally identical to
+3. **The CSV-instrumented build is not behaviourally identical to
    production.** In `lib/CrsfSerial/CrsfSerial.cpp` the channel→µs scaling is
    wrapped in `#ifndef CRSF_PERFORMANCE_CSV`, so with logging enabled
    `getChannel()` returns **raw** values instead of microseconds. Any
    conclusion drawn from a capture must account for this.
 
-5. **Startup takes ~10 s before the servo is usable.** `_delay(5000)`, then
-   `motor.init()` (2 × 500 ms), then `initFOC()` (≈3 s of alignment sweeps),
-   then the two 1 s calibration sweeps. The radio's channel frames are missed
-   throughout.
+4. **Startup takes ~13 s before the servo is usable.** `_delay(5000)`, then
+   `motor.init()` (2 x 500 ms), then `initFOC()` (~3 s of alignment sweeps),
+   then the two stall-detected travel sweeps (~2 s). The link carries on in
+   the meantime, but the channel frames that arrive during setup are only
+   processed once `loop()` starts.
 
 ---
 
