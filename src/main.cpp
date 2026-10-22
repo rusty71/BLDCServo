@@ -88,11 +88,24 @@ void setup() {
   motor.LPF_velocity.Tf = 0.01;
 
   motor.init();
-  motor.initFOC();
-  // motor.sensor_offset = sensor1.getAngle();
+  if (!motor.initFOC())
+  {
+    // Alignment failed: the electrical zero is unknown, so the motor has to
+    // stay disabled - driving it now would use a bogus commutation angle.
+    // initFOC() has already disabled the driver.
+    Serial.println("FOC alignment FAILED - motor left disabled.");
+    Serial.println("check the supply, the driver wiring and the pole pair count");
+    _delay(100);
+    return;
+  }
 
   Serial.println("calibrate");
-  sens = sensor1.getAngle();
+  // Sample in the frame the position controller compares against:
+  //   motor.shaftAngle() = sensor_direction * getAngle() - sensor_offset
+  // The raw encoder angle is NOT the same frame when the encoder counts the
+  // other way round, and using it would mirror the whole travel.
+  motor.loopFOC();
+  sens = motor.shaftAngle();
 
   max_angle = sens;
   min_angle = sens;
@@ -111,7 +124,7 @@ if(1){
     motor.loopFOC();
     motor.move();
   }
-  min_angle = sensor1.getAngle();
+  min_angle = motor.shaftAngle();
   
   motor.enable();
 //force max angle
@@ -128,7 +141,7 @@ if(1){
     motor.loopFOC();
     motor.move();
   }
-  max_angle = sensor1.getAngle();
+  max_angle = motor.shaftAngle();
 
   now = millis();
   while((millis()-now) < 1000) {

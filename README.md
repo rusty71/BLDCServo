@@ -99,10 +99,54 @@ where direction `<` = received and `>` = transmitted.
 
 ---
 
+## The position lock
+
+The servo runs SimpleFOC's angle mode, so the chain is:
+
+```
+motor.target  ->  P_angle(target - motor.shaft_angle)  ->  velocity setpoint
+               ->  PID_velocity(setpoint - motor.shaft_velocity)  ->  voltage
+               ->  loopFOC(): commutation against motor.electricalAngle()
+```
+
+`motor.shaft_angle` is **not** the raw encoder angle:
+
+```cpp
+shaftAngle() = sensor_direction * LPF_angle(sensor->getAngle()) - sensor_offset;
+```
+
+`sensor_direction` is `+1` or `-1` and is decided by SimpleFOC's
+`alignSensor()` from the way the rotor moves during alignment - it depends on
+the motor's phase order and how the encoder is mounted. The *raw* encoder
+angle and the *controller's* angle are therefore only the same frame when
+`sensor_direction == +1`.
+
+**The calibration must sample `motor.shaftAngle()`, not
+`sensor1.getAngle()`.** Sampling the raw angle mirrors the whole travel when
+the encoder counts the other way: the servo still reaches its commanded
+position, but at the opposite end of the range.
+
+A host-side simulation of the exact SimpleFOC control law
+(`Sensor::update/getAngle/getVelocity`, `FOCMotor::shaftAngle/shaftVelocity`,
+`BLDCMotor::move`, `PIDController::operator`) shows the difference:
+
+| case | calibration frame | `sensor_direction` | result |
+| ---- | ----------------- | ------------------ | ------ |
+| A | raw (as written) | `+1` | locked, 0.4 deg residual |
+| B | raw (as written) | `-1` | locked, but at the **mirrored** position |
+| C | `motor.shaftAngle()` | `+1` | locked, 0.4 deg residual |
+| D | `motor.shaftAngle()` | `-1` | locked at the **correct** position |
+
+The sketch now uses `motor.shaftAngle()` for the calibration.
+
+Note that the encoder's zero position is *not* a problem: `Sensor::getAngle()`
+returns the **unwrapped** angle (`full_rotations * 2pi + angle_prev`), so
+`min`/`max` over a continuous sweep are correct even when the range
+straddles the encoder's zero.
+
 ## Known issues
 
-Verified from the code and the captured trace. **Not** fixed here because each
-needs hardware validation.
+Verified from the code and the captured trace.
 
 1. **The battery telemetry is hijacked.** `checkVbatt(steering - 989)` reports
    the *steering position* as a battery voltage (1.1 V … 101.1 V) and leaves
@@ -110,23 +154,26 @@ needs hardware validation.
    0 %. It also fires a response on **every** received channel frame (248 Hz),
    which contends for the shared CRSF bus.
 
-2. **The calibration has no wrap-around handling.** `min_angle` / `max_angle`
-   are raw encoder angles (0…2π). If the mechanical range straddles 0/2π then
-   `min_angle > max_angle` and the channel→angle mapping inverts.
+2. **The calibration samples the wrong moments.** The extremes are read once,
+   at the end of each 1 s sweep, instead of being tracked, so an overshoot that
+   settles back is not seen. ±3 V for 1 s is also a modest torque - if the
+   servo does not reach its limits the calibrated range is wrong. The range is
+   measured with the motor *coasting*, so back-drive and load-dependent
+   deflection are included.
 
-3. **The calibration may not reach the mechanical stops.** ±3 V for 1 s is a
-   modest torque; if the servo does not hit its limits the calibrated range
-   will be wrong. The range is also measured with the motor *coasting*, so
-   back-drive and load-dependent deflection are included.
-
-4. **The encoder is 11-bit.** The source comments note that 11 bits "causes
+3. **The encoder is 11-bit.** The source comments note that 11 bits "causes
    rumbling" and that 10 may be better.
 
-5. **The CSV-instrumented build is not behaviourally identical to
+4. **The CSV-instrumented build is not behaviourally identical to
    production.** In `lib/CrsfSerial/CrsfSerial.cpp` the channel→µs scaling is
    wrapped in `#ifndef CRSF_PERFORMANCE_CSV`, so with logging enabled
    `getChannel()` returns **raw** values instead of microseconds. Any
    conclusion drawn from a capture must account for this.
+
+5. **Startup takes ~10 s before the servo is usable.** `_delay(5000)`, then
+   `motor.init()` (2 × 500 ms), then `initFOC()` (≈3 s of alignment sweeps),
+   then the two 1 s calibration sweeps. The radio's channel frames are missed
+   throughout.
 
 ---
 
