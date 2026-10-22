@@ -99,6 +99,34 @@ where direction `<` = received and `>` = transmitted.
 
 ---
 
+## The position report
+
+The servo reports its **actual** position back to the handset through the
+ELRS telemetry, so the handset's steering wheel can follow it. It travels in
+the battery sensor frame (`0x08`), in the raw CRSF channel scale:
+
+| raw value | servo position |
+| --------- | -------------- |
+| `CRSF_CHANNEL_VALUE_MIN` (172) | `min_angle` |
+| `CRSF_CHANNEL_VALUE_MAX` (1811) | `max_angle` |
+| the midpoint (991) | `center_angle` |
+
+```cpp
+float t = (motor.shaft_angle - min_angle) / (max_angle - min_angle);
+raw = CRSF_CHANNEL_VALUE_MIN + t * (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MIN);
+```
+
+The frame is sent on every received channel frame and, in addition, every
+20 ms from the main loop so the position keeps flowing even when the radio
+stops sending channels.
+
+The battery frame's values are big endian on the wire (per the CRSF spec),
+so the handset swaps them back with `be16toh()` when it decodes them.
+
+The field is being used as a position carrier rather than a voltage, so the
+radio will show an odd battery reading - that is the price of the CRSF
+telemetry path.
+
 ## The position lock
 
 The servo runs SimpleFOC's angle mode, so the chain is:
@@ -148,11 +176,11 @@ straddles the encoder's zero.
 
 Verified from the code and the captured trace.
 
-1. **The battery telemetry is hijacked.** `checkVbatt(steering - 989)` reports
-   the *steering position* as a battery voltage (1.1 V … 101.1 V) and leaves
-   `capacity` and `remaining` at zero, so the radio's battery readout shows
-   0 %. It also fires a response on **every** received channel frame (248 Hz),
-   which contends for the shared CRSF bus.
+1. **The battery telemetry is hijacked.** The `0x08` frame's voltage field
+   carries the **position** instead of a voltage, and `capacity` / `remaining`
+   are zero, so the radio's battery readout is nonsense. It also fires a
+   frame on **every** received channel frame (248 Hz), which contends for the
+   shared CRSF bus - consider sending it less often.
 
 2. **The calibration samples the wrong moments.** The extremes are read once,
    at the end of each 1 s sweep, instead of being tracked, so an overshoot that

@@ -35,20 +35,40 @@ CrsfSerial crsf(Serial1, 420000);
 static float min_angle, max_angle, center_angle;
 
 
-static void checkVbatt(uint16_t bat)
+// The servo reports its *actual* position back to the handset through the
+// ELRS telemetry, so the handset's steering wheel can follow it.
+//
+// It travels in the battery sensor frame (0x08) - the field is used as a
+// raw CRSF channel value, so the handset can decode it with the same scale
+// it uses for its own injected channel:
+//
+//   CRSF_CHANNEL_VALUE_MIN (172) = servo at min_angle
+//   CRSF_CHANNEL_VALUE_MAX (1811) = servo at max_angle
+//   the midpoint = servo at centre_angle
+static uint16_t positionToRaw()
+{
+    float span = max_angle - min_angle;
+    if (span == 0.0f)
+        return CRSF_CHANNEL_VALUE_MIN;         // no travel measured
+    float t = (motor.shaft_angle - min_angle) / span;   // 0..1
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    return (uint16_t)(CRSF_CHANNEL_VALUE_MIN +
+                      t * (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MIN));
+}
+
+static void sendPosition()
 {
     crsf_sensor_battery_t crsfbatt = { 0 };
-    uint16_t scaledVoltage = bat;
+    uint16_t raw = positionToRaw();
     // Values are MSB first (BigEndian)
-    // crsfbatt.voltage = htobe32(scaledVoltage);
-    crsfbatt.voltage = htobe16(scaledVoltage);
+    crsfbatt.voltage = htobe16(raw);
     crsf.queuePacket(CRSF_SYNC_BYTE, CRSF_FRAMETYPE_BATTERY_SENSOR, &crsfbatt, sizeof(crsfbatt));
-
 }
 
 void packetChannels()
 {
-  int steering = crsf.getChannel(2);  //CHECKME: expect 1000-2000
+  int steering = crsf.getChannel(2);  // expect 1000-2000 us
   // Serial.print(steering);
 
   // (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
@@ -56,8 +76,6 @@ void packetChannels()
   // sensor1.getRawCount();
   // Serial.print('\t');
   // Serial.println(motor.target);
-  // int target;
-  checkVbatt(steering-989);
 }
 
 
@@ -168,9 +186,15 @@ if(1){
 
 void loop() {
   static int loop_timer = millis();
+  static uint32_t position_timer = 0;
   crsf.loop();
   motor.loopFOC();
   motor.move();
+  // Keep reporting the position even when no channel frame arrives
+  if ((uint32_t)(millis() - position_timer) >= 20) {
+    position_timer = millis();
+    sendPosition();
+  }
   if((millis() - loop_timer)>1000) {
     Serial.println(sensor1.getAngle());
     loop_timer = millis();
