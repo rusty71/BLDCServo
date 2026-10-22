@@ -23,9 +23,16 @@ public:
     uint32_t getBaud() const { return _baud; };
     // Return current channel value (1-based) in us
     int getChannel(unsigned int ch) const { return _channels[ch - 1]; }
+    // Return the raw 11 bit channel value (1-based), without the us mapping.
+    // Needed for anything that has to survive a round trip unchanged, e.g. a
+    // latency token.
+    int getChannelRaw(unsigned int ch) const { return _channels_raw[ch - 1]; }
     const crsfLinkStatistics_t *getLinkStatistics() const { return &_linkStatistics; }
     const crsf_sensor_gps_t *getGpsSensor() const { return &_gpsSensor; }
     bool isLinkUp() const { return _linkIsUp; }
+    // Number of CRSF frames received with a valid CRC - for diagnostics
+    uint32_t framesReceived() const { return _framesReceived; }
+    uint32_t bytesReceived() const { return _bytesReceived; }
     bool getPassthroughMode() const { return _passthroughBaud != 0; }
     void setPassthroughMode(bool val, uint32_t passthroughBaud = 0);
 
@@ -53,6 +60,9 @@ private:
     bool _linkIsUp;
     uint32_t _passthroughBaud;
     int _channels[CRSF_NUM_CHANNELS];
+    int _channels_raw[CRSF_NUM_CHANNELS];
+    uint32_t _framesReceived = 0;
+    uint32_t _bytesReceived = 0;
 
     void handleSerialIn();
     void handleByteReceived();

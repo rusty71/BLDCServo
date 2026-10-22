@@ -62,6 +62,7 @@ void CrsfSerial::handleSerialIn()
 
         if(_rxBufPos == 0)
             _pktStart = micros();
+        _bytesReceived++;
         if (getPassthroughMode())
         {
             if (onOobData)
@@ -140,6 +141,7 @@ void CrsfSerial::checkLinkDown()
 
 void CrsfSerial::processPacketIn(uint8_t len)
 {
+    _framesReceived++;
     const crsf_header_t *hdr = (crsf_header_t *)_rxBuf;
 #ifdef CRSF_PERFORMANCE_CSV
     const crsf_channels_t *channels = (crsf_channels_t *)(_rxBuf+3);
@@ -205,21 +207,37 @@ void CrsfSerial::packetChannelsPacked(const crsf_header_t *p)
 
     // hexdump((void *)p, 26);
 
+    _channels_raw[0] = ch->ch0;
     _channels[0] = ch->ch0;
+    _channels_raw[1] = ch->ch1;
     _channels[1] = ch->ch1;
+    _channels_raw[2] = ch->ch2;
     _channels[2] = ch->ch2;
+    _channels_raw[3] = ch->ch3;
     _channels[3] = ch->ch3;
+    _channels_raw[4] = ch->ch4;
     _channels[4] = ch->ch4;
+    _channels_raw[5] = ch->ch5;
     _channels[5] = ch->ch5;
+    _channels_raw[6] = ch->ch6;
     _channels[6] = ch->ch6;
+    _channels_raw[7] = ch->ch7;
     _channels[7] = ch->ch7;
+    _channels_raw[8] = ch->ch8;
     _channels[8] = ch->ch8;
+    _channels_raw[9] = ch->ch9;
     _channels[9] = ch->ch9;
+    _channels_raw[10] = ch->ch10;
     _channels[10] = ch->ch10;
+    _channels_raw[11] = ch->ch11;
     _channels[11] = ch->ch11;
+    _channels_raw[12] = ch->ch12;
     _channels[12] = ch->ch12;
+    _channels_raw[13] = ch->ch13;
     _channels[13] = ch->ch13;
+    _channels_raw[14] = ch->ch14;
     _channels[14] = ch->ch14;
+    _channels_raw[15] = ch->ch15;
     _channels[15] = ch->ch15;
     // Serial.print("********************    ");
     // Serial.println(ch->ch0);

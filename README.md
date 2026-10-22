@@ -116,9 +116,15 @@ float t = (motor.shaft_angle - min_angle) / (max_angle - min_angle);
 raw = CRSF_CHANNEL_VALUE_MIN + t * (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MIN);
 ```
 
-The frame is sent on every received channel frame and, in addition, every
-20 ms from the main loop so the position keeps flowing even when the radio
-stops sending channels.
+The frame's `current` field carries back the **latency token** the handset
+sent in channel 2, so the handset can measure the round trip (see the
+BLDCHandset README). The token is read with `getChannelRaw()`, i.e. without
+the microseconds mapping, which would otherwise mangle it.
+
+The frame is sent immediately on every received channel frame. The 20 ms
+timer from the main loop is only a fallback for when channel frames stop
+arriving for 100 ms, so it does not add extra telemetry traffic (and extra
+delay) while the link is healthy.
 
 The battery frame's values are big endian on the wire (per the CRSF spec),
 so the handset swaps them back with `be16toh()` when it decodes them.
