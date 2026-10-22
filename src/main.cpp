@@ -34,27 +34,34 @@ CrsfSerial crsf(Serial1, 420000);
 
 static float min_angle, max_angle, center_angle;
 
+// Holding stiffness in normal operation (after the calibration sweep, which
+// always runs at CAL_VOLTAGE_LIMIT). Both motors run the same position loop,
+// so the servo has to actually reach the position the handset commands within
+// the frame interval; too soft and the wheel pulls back before it gets there.
+// Menu 'v' and 'q' change these live.
+#define SERVO_VOLTAGE_LIMIT 12.0f
+#define SERVO_P_ANGLE       20.0f
+
 
 // The servo reports its *actual* position back to the handset through the
 // ELRS telemetry, so the handset's steering wheel can follow it.
 //
-// It travels in the battery sensor frame (0x08) - the field is used as a
-// raw CRSF channel value, so the handset can decode it with the same scale
-// it uses for its own injected channel:
-//
-//   CRSF_CHANNEL_VALUE_MIN (172) = servo at min_angle
-//   CRSF_CHANNEL_VALUE_MAX (1811) = servo at max_angle
-//   the midpoint = servo at centre_angle
+// It travels in the battery sensor frame (0x08), which is a plain big endian
+// uint16 - the whole range is used, because the loop is unity gain: the
+// handset's target is derived from this number, and any quantisation step
+// left in it is integrated by the loop and slowly walks the wheel (at the
+// 11 bit channel scale a step was 0.0018 of the travel = 0.006 rad of wheel,
+// and the wheel crawled to a stop within seconds). Full scale is
+// 0 = min_angle, 65535 = max_angle, 32767/32768 = centre_angle.
 static uint16_t positionToRaw()
 {
     float span = max_angle - min_angle;
     if (span == 0.0f)
-        return CRSF_CHANNEL_VALUE_MIN;         // no travel measured
+        return 0;                              // no travel measured
     float t = (motor.shaft_angle - min_angle) / span;   // 0..1
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-    return (uint16_t)(CRSF_CHANNEL_VALUE_MIN +
-                      t * (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MIN));
+    return (uint16_t)(t * 65535.0f);
 }
 
 // The token the handset sent in channel 3, echoed back so it can measure the
@@ -65,7 +72,7 @@ static uint32_t last_channel_rx = 0;
 static void sendPosition()
 {
     crsf_sensor_battery_t crsfbatt = { 0 };
-    // voltage : our own position, raw CRSF channel scale
+    // voltage : our own position, full 16 bit over the measured travel
     // current : the token we received, echoed back
     crsfbatt.voltage = htobe16(positionToRaw());
     crsfbatt.current = htobe16(rx_token);
@@ -173,6 +180,111 @@ static float sweepToStop(float direction, float start)
   return motor.shaft_angle;
 }
 
+// ---------------------------------------------------------------------------
+// Serial console
+//
+// The servo is driven from the handset over CRSF, but its holding stiffness
+// decides how the pair feels when either end is turned by hand: a stiff servo
+// always snaps back to its commanded angle before the handset's lighter wheel
+// can follow it. These commands let that be tuned live instead of reflashing.
+// ---------------------------------------------------------------------------
+static void printServoHelp()
+{
+  Serial.println();
+  Serial.println("servo commands:");
+  Serial.println("  s          show travel, target, position and tuning");
+  Serial.println("  v <volts>  voltage limit (how hard it holds; 1..12)");
+  Serial.println("  q <P>      position gain (how fast it returns; 0.5..50)");
+  Serial.println("  h          this help");
+  Serial.println();
+}
+
+static void printServoStatus()
+{
+  Serial.print("  travel ");
+  Serial.print(min_angle, 4);
+  Serial.print(" .. ");
+  Serial.print(max_angle, 4);
+  Serial.print("  centre ");
+  Serial.print(center_angle, 4);
+  Serial.print("  (");
+  Serial.print((max_angle - min_angle) * 180.0f / PI, 1);
+  Serial.println(" deg)");
+  Serial.print("  target ");
+  Serial.print(motor.target, 4);
+  Serial.print("  pos ");
+  Serial.print(motor.shaft_angle, 4);
+  Serial.print("  err ");
+  Serial.print(motor.target - motor.shaft_angle, 4);
+  Serial.print("  voltage_limit ");
+  Serial.print(motor.voltage_limit, 1);
+  Serial.print(" V  P_angle ");
+  Serial.println(motor.P_angle.P, 1);
+}
+
+static char consoleLine[40];
+static uint8_t consoleLen = 0;
+
+static void pollConsole()
+{
+  while (Serial.available() > 0)
+  {
+    char c = (char)Serial.read();
+    if (c == '\r' || c == '\n')
+    {
+      if (consoleLen == 0)
+        continue;
+      consoleLine[consoleLen] = 0;
+      consoleLen = 0;
+
+      if (strcmp(consoleLine, "s") == 0)
+        printServoStatus();
+      else if (strcmp(consoleLine, "h") == 0 || strcmp(consoleLine, "?") == 0)
+        printServoHelp();
+      else if (consoleLine[0] == 'v' && consoleLine[1] == ' ')
+      {
+        // strtod: this newlib build has no floating point scanf
+        char *end = NULL;
+        double volts = strtod(consoleLine + 2, &end);
+        if (end != NULL && end != consoleLine + 2)
+        {
+          if (volts < 1.0) volts = 1.0;
+          if (volts > 12.0) volts = 12.0;
+          motor.voltage_limit = (float)volts;
+          Serial.print("  voltage limit ");
+          Serial.print(motor.voltage_limit, 1);
+          Serial.println(" V");
+        }
+        else
+          Serial.println("  usage: v <volts>   (1..12)");
+      }
+      else if (consoleLine[0] == 'q' && consoleLine[1] == ' ')
+      {
+        char *end = NULL;
+        double p = strtod(consoleLine + 2, &end);
+        if (end != NULL && end != consoleLine + 2)
+        {
+          if (p < 0.5) p = 0.5;
+          if (p > 50.0) p = 50.0;
+          motor.P_angle.P = (float)p;
+          Serial.print("  position gain P_angle ");
+          Serial.println(motor.P_angle.P, 1);
+        }
+        else
+          Serial.println("  usage: q <P_angle>   (0.5..50)");
+      }
+      else
+      {
+        Serial.print("  unknown command: ");
+        Serial.println(consoleLine);
+        Serial.println("  h for help");
+      }
+    }
+    else if (consoleLen < sizeof(consoleLine) - 1)
+      consoleLine[consoleLen++] = c;
+  }
+}
+
 void setup() {
   float sens;
   _delay(5000);
@@ -250,12 +362,18 @@ void setup() {
     return;
   }
 
-  motor.voltage_limit = 12.0f;
+  motor.voltage_limit = SERVO_VOLTAGE_LIMIT;
+  motor.P_angle.P = SERVO_P_ANGLE;
   motor.target = center_angle;
   motor.enable();
   motor.loopFOC();
   motor.move();
-  Serial.println("  at center");
+  Serial.print("  at center  (voltage_limit ");
+  Serial.print(motor.voltage_limit, 1);
+  Serial.print(" V, P_angle ");
+  Serial.print(motor.P_angle.P, 1);
+  Serial.println(")");
+  printServoHelp();
    _delay(100);
 }
 
@@ -263,6 +381,7 @@ void loop() {
   static int loop_timer = millis();
   static uint32_t position_timer = 0;
   crsf.loop();
+  pollConsole();
   motor.loopFOC();
   motor.move();
   static uint32_t stat_timer = 0;

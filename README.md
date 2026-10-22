@@ -44,7 +44,8 @@ stop at each end, so the sketch finds them by stalling the motor against them:
    If the span comes out under 0.2 rad the linkage is jammed or disconnected;
    the motor is then left disabled instead of mapping the channel onto
    almost no travel.
-6. Restore the 12 V limit, stay in angle mode and move to `center_angle`.
+6. Restore the normal holding settings (`SERVO_VOLTAGE_LIMIT` 12 V,
+   `SERVO_P_ANGLE` 20), stay in angle mode and move to `center_angle`.
 
 `CAL_TIMEOUT_MS` (8 s) bounds each sweep. On the bench the two sweeps take
 about two seconds, on top of the 5 s power-up delay, the 1 s `motor.init()`
@@ -133,18 +134,25 @@ where direction `<` = received and `>` = transmitted.
 
 The servo reports its **actual** position back to the handset through the
 ELRS telemetry, so the handset's steering wheel can follow it. It travels in
-the battery sensor frame (`0x08`), in the raw CRSF channel scale:
+the battery sensor frame (`0x08`), using the whole 16 bit voltage field:
 
 | raw value | servo position |
 | --------- | -------------- |
-| `CRSF_CHANNEL_VALUE_MIN` (172) | `min_angle` |
-| `CRSF_CHANNEL_VALUE_MAX` (1811) | `max_angle` |
-| the midpoint (991) | `center_angle` |
+| `0` | `min_angle` |
+| `65535` | `max_angle` |
+| `32767` / `32768` | `center_angle` |
 
 ```cpp
 float t = (motor.shaft_angle - min_angle) / (max_angle - min_angle);
-raw = CRSF_CHANNEL_VALUE_MIN + t * (CRSF_CHANNEL_VALUE_MAX - CRSF_CHANNEL_VALUE_MIN);
+raw = t * 65535.0f;
 ```
+
+The handset's follow loop is **unity gain**, so every quantisation step in
+this number becomes a permanent position error that it integrates. At the
+11 bit CRSF channel scale (172..1811, which this field used to carry) one step
+was 0.0018 of the travel = 0.006 rad of wheel, and the wheel crawled away from
+where it was left in seconds. At 16 bit one step is 0.00003 of the travel,
+below the encoder's own resolution.
 
 The frame's `current` field carries back the **latency token** the handset
 sent in channel 2, so the handset can measure the round trip (see the
@@ -207,6 +215,29 @@ Note that the encoder's zero position is *not* a problem: `Sensor::getAngle()`
 returns the **unwrapped** angle (`full_rotations * 2pi + angle_prev`), so
 `min`/`max` over a continuous sweep are correct even when the range
 straddles the encoder's zero.
+
+## Serial console
+
+The servo is driven from the handset over CRSF, but how hard it holds decides
+how the pair feels, and that is worth tuning without a reflash. The USB serial
+port (115 200 baud) has a small console:
+
+```
+> s          show travel, target, position, error and the current tuning
+> v <volts>  voltage limit, i.e. how hard it holds against a hand (1 .. 12)
+> q <P>      position gain, i.e. how fast it returns (0.5 .. 50)
+> h          help
+```
+
+The defaults are **12 V / P_angle 20**, applied after the boot calibration
+(the sweep itself always runs at the reduced `CAL_VOLTAGE_LIMIT`). They are
+not just a taste question: the pair is two position loops facing each other
+over the radio, and the servo has to reach the position the wheel commands
+before the wheel's own loop pulls back towards the old one. Too soft (6 V /
+P_angle 8 was tried) and turning the handset appears to do nothing, because
+the wheel returns before the servo arrives. Softer settings are still useful
+when back-driving the servo by hand is more important than the reverse
+direction.
 
 ## Known issues
 
